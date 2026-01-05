@@ -596,7 +596,7 @@ Partially. The PyTorch nightly + CUDA 12.8 approach should work for any Blackwel
 
 ## About the Author
 
-**Martim Ramos** DevOps Lead seeking AI Infra & Agentic AI roles | Obsessed with real AI systems, not buzzwords.orchestration.
+**Martim Ramos** DevOps Lead seeking AI Infra & Agentic AI roles | Obsessed with real AI systems, not buzzwords.
 
 - GitHub: [github.com/martimramos](https://github.com/martimramos)
 - LinkedIn: [linkedin.com/in/martimramos](https://linkedin.com/in/martimramos)
