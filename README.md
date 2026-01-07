@@ -9,10 +9,10 @@
 
 | | |
 |---------------------|----------------------------------------------------------------------|
-| **Author** | **Martim Ramos** , DevOps @ AXA |
+| **Author** | **Martim Ramos** —  DevOps Lead @ AXA (The Lead tha codes 90%+ of the time.)  |
 | **Hardware** | NVIDIA DGX Spark with GB10 (Blackwell architecture, sm_121) |
 | **Last Updated** | January 2025 |
-| **Verified Working** | Video generation, lip-sync avatars, image diffusion, music generation |
+| **Verified Working** | Video generation, lip-sync avatars, image diffusion, music LoRA training |
 | **License** | MIT |
 
 ---
@@ -21,12 +21,14 @@
 
 **I bought a DGX Spark expecting to run video generation models within hours. Instead, I spent three days fighting errors that had zero documentation online.**
 
-The DGX Spark is NVIDIA's first desktop AI supercomputer featuring the GB10 Blackwell chip. It's powerful 128GB unified memory, 1 PFLOP of AI performance but almost nothing works out of the box:
+The DGX Spark is NVIDIA's first desktop AI supercomputer featuring the GB10 Blackwell chip. It's powerful — 128GB unified memory, 1 PFLOP of AI performance — but almost nothing works out of the box:
 
 - ❌ Standard PyTorch doesn't support it
 - ❌ NGC containers don't support it  
 - ❌ Flash Attention has no prebuilt wheels
 - ❌ Most ARM64 + CUDA packages don't exist
+- ❌ TorchCodec installs a dummy package
+- ❌ TensorBoard's Docker image is x86_64 only
 
 This guide documents every problem I encountered and how I solved it. If you're Googling a DGX Spark error at 2am, this is for you.
 
@@ -53,13 +55,13 @@ pip install --pre torch torchvision torchaudio --index-url https://download.pyto
 | Component | Specification |
 |-----------|---------------|
 | **GPU** | NVIDIA GB10 (Blackwell architecture, compute capability sm_121) |
-| **Platform** | ARM64 (aarch64) not x86_64 |
+| **Platform** | ARM64 (aarch64) — not x86_64 |
 | **System CUDA** | 13.0 |
 | **Unified Memory** | 128GB shared between CPU and GPU |
 | **OS** | Ubuntu 24.04 LTS |
 | **Driver** | 580.95.05 |
 
-**Key insight:** The 128GB is unified memory CPU and GPU share the same pool. This means CPU offloading provides zero benefit (unlike discrete GPUs), but you can load massive models without OOM errors.
+**Key insight:** The 128GB is unified memory — CPU and GPU share the same pool. This means CPU offloading provides zero benefit (unlike discrete GPUs), but you can load massive models without OOM errors.
 
 ---
 
@@ -140,7 +142,7 @@ RUN pip install --pre torch torchvision torchaudio --index-url https://download.
 
 **Option B: Patch PyTorch's cpp_extension.py**
 
-Edit `.venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py` around line 546 to allow ±1 CUDA major version mismatch. This is a workaround Docker is cleaner.
+Edit `.venv/lib/python3.12/site-packages/torch/utils/cpp_extension.py` around line 546 to allow ±1 CUDA major version mismatch. This is a workaround — Docker is cleaner.
 
 ---
 
@@ -300,7 +302,7 @@ from torch.nn.functional import scaled_dot_product_attention
 
 ### How is DGX Spark memory different?
 
-Unlike discrete GPUs where CPU RAM and GPU VRAM are separate, DGX Spark uses unified memory the 128GB is shared between CPU and GPU.
+Unlike discrete GPUs where CPU RAM and GPU VRAM are separate, DGX Spark uses unified memory — the 128GB is shared between CPU and GPU.
 
 | Traditional GPU | DGX Spark |
 |-----------------|-----------|
@@ -310,7 +312,7 @@ Unlike discrete GPUs where CPU RAM and GPU VRAM are separate, DGX Spark uses uni
 
 ### What does this mean for my workloads?
 
-- **Don't use** `--offload_model` or CPU offloading flags they provide zero benefit
+- **Don't use** `--offload_model` or CPU offloading flags — they provide zero benefit
 - Large models (50GB+) load easily without OOM errors
 - Performance is compute-bound, not memory-bound
 - Expect ~65 seconds/step for 5B parameter diffusion models
@@ -403,7 +405,86 @@ Pin peft to a version compatible with your transformers:
 ```dockerfile
 # For transformers 4.50.0:
 RUN pip install "peft>=0.10.0,<0.14.0"
+
+# Or upgrade both for latest compatibility:
+RUN pip install "transformers>=4.51.0" "peft>=0.17.0"
 ```
+
+---
+
+## Challenge 12: TorchCodec Not Available
+
+### What error will I see?
+
+```
+ImportError: TorchCodec is required for load_with_torchcodec. Please install torchcodec to use this function.
+```
+
+Or when saving audio:
+
+```
+ImportError: TorchCodec is required for save_with_torchcodec. Please install torchcodec to use this function.
+```
+
+### Why does this happen?
+
+PyTorch nightly's torchaudio (2.10.0+) uses TorchCodec as the default backend for both loading and saving audio. However, `pip install torchcodec` installs a dummy placeholder package (version 0.0.0.dev0), not the actual library. The real TorchCodec isn't available for ARM64.
+
+### How do I fix it?
+
+Use the `soundfile` library instead of torchaudio for both loading and saving:
+
+```python
+import soundfile as sf
+import torch
+
+# Loading audio
+# Instead of: audio, sr = torchaudio.load(filename)
+audio_np, sr = sf.read(filename, dtype='float32')
+audio = torch.from_numpy(audio_np)
+if audio.dim() == 1:
+    audio = audio.unsqueeze(0)  # mono: add channel dim
+else:
+    audio = audio.t()  # stereo: (samples, channels) -> (channels, samples)
+
+# Saving audio
+# Instead of: torchaudio.save(path, tensor, sr)
+sf.write(path, tensor.cpu().t().numpy(), sr)  # (channels, samples) -> (samples, channels)
+```
+
+Install with: `pip install soundfile`
+
+---
+
+## Challenge 13: TensorFlow/TensorBoard Docker Images x86_64 Only
+
+### What error will I see?
+
+```
+WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8)
+```
+
+### Why does this happen?
+
+The official `tensorflow/tensorflow` Docker image is built for x86_64 only. Running it on ARM64 triggers QEMU emulation, which is extremely slow and may crash.
+
+### How do I fix it?
+
+Use `python:3.10-slim` (which has native ARM64 builds) and install TensorBoard at runtime:
+
+```yaml
+services:
+  tensorboard:
+    image: python:3.10-slim
+    command: >
+      bash -c "pip install -q tensorboard && tensorboard --logdir=/logs --host=0.0.0.0 --port=6006"
+    volumes:
+      - ./logs:/logs
+    ports:
+      - "6006:6006"
+```
+
+**Note:** You'll see "TensorFlow installation not found - running with reduced feature set" — this is normal and doesn't affect log viewing.
 
 ---
 
@@ -422,6 +503,10 @@ RUN pip install "peft>=0.10.0,<0.14.0"
 | `unknown runtime name: nvidia` | Docker runtime not configured | Use `deploy.resources.reservations` |
 | `No module named 'transformers.modeling_layers'` | peft/transformers mismatch | Pin peft to compatible version |
 | `No matching distribution for spacy==X.X.X` | Pinned spacy lacks ARM64 wheel | Use `spacy>=3.7.0` |
+| `TorchCodec is required` | torchaudio nightly needs TorchCodec | Use `soundfile` for audio I/O |
+| `Target modules X not found in base model` | LoRA config has invalid module names | Inspect model with `model.named_modules()` |
+| DataLoader workers use excessive memory | Workers fork entire process state | Set `num_workers=0` |
+| `platform (linux/amd64) does not match` | Docker image is x86_64 only | Use ARM64-native image |
 
 ---
 
@@ -443,6 +528,7 @@ For simple projects that don't require MMLab:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+pip install soundfile  # For audio loading/saving (TorchCodec workaround)
 ```
 
 ---
@@ -492,6 +578,15 @@ services:
       - ./models:/app/models
     ports:
       - "7860:7860"
+
+  tensorboard:
+    image: python:3.10-slim  # ARM64-native, not tensorflow/tensorflow
+    command: >
+      bash -c "pip install -q tensorboard && tensorboard --logdir=/logs --host=0.0.0.0 --port=6006"
+    volumes:
+      - ./logs:/logs
+    ports:
+      - "6006:6006"
 ```
 
 ---
@@ -517,7 +612,14 @@ These configurations have been tested and verified working on DGX Spark by Marti
 
 ### Music Generation (LoRA Training)
 - **Approach:** Docker with custom Dockerfile
-- **Key fixes:** spacy version flexibility, peft version pinning
+- **Model size:** 4.5B parameters total, 283M trainable (LoRA)
+- **Key fixes applied:**
+  - spacy version flexibility (`>=3.7.0`)
+  - transformers/peft upgraded (`>=4.51.0` / `>=0.17.0`)
+  - Audio I/O patched to use `soundfile`
+  - LoRA target modules corrected (`to_q`, `to_k`, `to_v`, `add_q_proj`, etc.)
+  - DataLoader set to `num_workers=0`
+- **Performance:** ~3.2 seconds/iteration, 96% GPU utilization
 - **Status:** Training and inference working
 
 ---
@@ -536,7 +638,11 @@ Starting a new ML project on DGX Spark?
 │   └─ NO  → PyTorch SDPA fallback works fine
 │
 ├─ Does it need video decoding (decord)?
-│   ├─ YES → Feature not available on ARM64 find alternatives
+│   ├─ YES → Feature not available on ARM64 — find alternatives
+│   └─ NO  → Continue below
+│
+├─ Does it need audio loading/saving?
+│   ├─ YES → Use soundfile instead of torchaudio
 │   └─ NO  → Continue below
 │
 ├─ Does it pin specific package versions?
@@ -547,14 +653,16 @@ Starting a new ML project on DGX Spark?
 │
 ├─ Using Docker?
 │   ├─ YES → Use deploy.resources.reservations syntax
+│   │        Use python:3.10-slim for TensorBoard (not tensorflow/tensorflow)
 │   └─ NO  → Continue below
 │
 └─ Basic setup:
     1. python3 -m venv .venv
     2. pip install --pre torch --index-url .../nightly/cu128
-    3. Install project dependencies
-    4. Patch torch.load if using old checkpoints
-    5. Check for ARM64 wheel issues on any failures
+    3. pip install soundfile (if using audio)
+    4. Install project dependencies
+    5. Patch torch.load if using old checkpoints
+    6. Set num_workers=0 if DataLoader causes memory issues
 ```
 
 ---
@@ -567,7 +675,7 @@ Yes, once you get past the initial setup pain. The 128GB unified memory lets you
 
 ### Why isn't NVIDIA providing better software support?
 
-The GB10 is new hardware (Blackwell architecture). NVIDIA is actively working on support NGC containers and official PyTorch releases will likely add sm_121 support in future updates. This guide bridges the gap until then.
+The GB10 is new hardware (Blackwell architecture). NVIDIA is actively working on support — NGC containers and official PyTorch releases will likely add sm_121 support in future updates. This guide bridges the gap until then.
 
 ### Should I use Docker or native Python venv?
 
@@ -577,6 +685,10 @@ The GB10 is new hardware (Blackwell architecture). NVIDIA is actively working on
 ### Can I use this guide for other Blackwell GPUs?
 
 Partially. The PyTorch nightly + CUDA 12.8 approach should work for any Blackwell GPU. However, specific challenges around ARM64 wheels are unique to DGX Spark's aarch64 platform.
+
+### Why is my DataLoader using so much memory?
+
+DataLoader workers fork the entire process state. On DGX Spark with large models already loaded, this can exhaust memory quickly. Set `num_workers=0` to load data in the main process.
 
 ### How do I get help if I'm stuck?
 
@@ -588,18 +700,19 @@ Partially. The PyTorch nightly + CUDA 12.8 approach should work for any Blackwel
 
 ## External Resources
 
-- [PyTorch DGX Spark Discussion](https://discuss.pytorch.org/t/dgx-spark-gb10-cuda-13-0-python-3-12-sm-121/223744) Community thread with ongoing solutions
-- [NVIDIA PyTorch Release Notes](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-25-02.html) Official compatibility information
-- [NVIDIA Spark CUDA-X Instructions](https://build.nvidia.com/spark/cuda-x-data-science/instructions) NVIDIA's setup guide
+- [PyTorch DGX Spark Discussion](https://discuss.pytorch.org/t/dgx-spark-gb10-cuda-13-0-python-3-12-sm-121/223744) — Community thread with ongoing solutions
+- [NVIDIA PyTorch Release Notes](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-25-02.html) — Official compatibility information
+- [NVIDIA Spark CUDA-X Instructions](https://build.nvidia.com/spark/cuda-x-data-science/instructions) — NVIDIA's setup guide
 
 ---
 
 ## About the Author
 
-**Martim Ramos** DevOps Lead seeking AI Infra & Agentic AI roles | Obsessed with real AI systems, not buzzwords.
+**Martim** is the founder of [Neural Forge](https://neuralforge.ai), an AI research and infrastructure company based in Portugal. He leads AI infrastructure at a major financial services organization and specializes in ML platform engineering, Kubernetes orchestration, and making bleeding-edge AI hardware actually work.
 
-- GitHub: [github.com/martimramos](https://github.com/martimramos)
-- LinkedIn: [linkedin.com/in/martimramos](https://linkedin.com/in/martimramos)
+- GitHub: [github.com/martimgaspar](https://github.com/martimgaspar)
+- LinkedIn: [linkedin.com/in/martimgaspar](https://linkedin.com/in/martimgaspar)
+- Company: [neuralforge.ai](https://neuralforge.ai)
 
 This guide was written after spending 72+ hours debugging DGX Spark issues across multiple ML projects. If it saved you time, consider starring the repo.
 
@@ -609,9 +722,10 @@ This guide was written after spending 72+ hours debugging DGX Spark issues acros
 
 | Date | Changes |
 |------|---------|
+| January 2025 | Added Challenge 12 (TorchCodec) and Challenge 13 (TensorBoard ARM64) |
+| January 2025 | Added music LoRA training configuration with performance benchmarks |
+| January 2025 | Expanded error table with DataLoader memory and LoRA module errors |
 | January 2025 | Initial release with 11 documented challenges |
-| January 2025 | Added music generation configuration, peft/transformers compatibility |
-| January 2025 | Added Docker runtime configuration guidance |
 
 ---
 
@@ -621,7 +735,7 @@ Found a new issue? Discovered a better solution? Contributions welcome:
 
 1. Open an issue describing the problem and your DGX Spark configuration
 2. Submit a PR with your fix and reproduction steps
-3. Help others in the discussions we're all figuring this out together
+3. Help others in the discussions — we're all figuring this out together
 
 ---
 
