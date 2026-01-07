@@ -708,11 +708,9 @@ DataLoader workers fork the entire process state. On DGX Spark with large models
 
 ## About the Author
 
-**Martim** is the founder of [Neural Forge](https://neuralforge.ai), an AI research and infrastructure company based in Portugal. He leads AI infrastructure at a major financial services organization and specializes in ML platform engineering, Kubernetes orchestration, and making bleeding-edge AI hardware actually work.
+- GitHub: [github.com/martimramos](https://github.com/martimramos)
+- LinkedIn: [linkedin.com/in/martimramos](https://linkedin.com/in/martimramos)
 
-- GitHub: [github.com/martimgaspar](https://github.com/martimgaspar)
-- LinkedIn: [linkedin.com/in/martimgaspar](https://linkedin.com/in/martimgaspar)
-- Company: [neuralforge.ai](https://neuralforge.ai)
 
 This guide was written after spending 72+ hours debugging DGX Spark issues across multiple ML projects. If it saved you time, consider starring the repo.
 
